@@ -1,0 +1,210 @@
+diff --git a/Modules/Dock/Dock.qml b/Modules/Dock/Dock.qml
+index bf729d8..d2092fb 100644
+--- a/Modules/Dock/Dock.qml
++++ b/Modules/Dock/Dock.qml
+@@ -74,6 +74,9 @@ Variants {
+             blurWidth: body.blurWidth
+             blurHeight: body.blurHeight
+             blurRadius: body.blurRadius
++            blurBottomRadius: body.glassStyle ? 0 : body.blurRadius
++            bottomFlareWidth: body.glassFlareWidth
++            bottomFlareHeight: body.glassFlareHeight
+         }
+ 
+         mask: body.editMode ? null : bodyMask
+diff --git a/Modules/Dock/DockAppButton.qml b/Modules/Dock/DockAppButton.qml
+index bcece47..27ae5e5 100644
+--- a/Modules/Dock/DockAppButton.qml
++++ b/Modules/Dock/DockAppButton.qml
+@@ -617,7 +617,7 @@ Item {
+                             return Math.max(4, actualIconSize * 0.1);
+                         return appData && appData.type === "grouped" && appData.windowCount > 1 ? Math.max(3, actualIconSize * 0.1) : Math.max(6, actualIconSize * 0.2);
+                     }
+-                    width: dotFocused ? baseWidth * 3 : baseWidth
++                    width: dotFocused && root.dockApps?.surfaceContext?.config?.redock?.enabled !== true ? baseWidth * 3 : baseWidth
+                     height: {
+                         if (root.options.indicatorStyle === "circle") {
+                             return Math.max(4, actualIconSize * 0.1);
+diff --git a/Modules/Dock/DockBody.qml b/Modules/Dock/DockBody.qml
+index 3b29b28..989ee9d 100644
+--- a/Modules/Dock/DockBody.qml
++++ b/Modules/Dock/DockBody.qml
+@@ -197,7 +197,18 @@ FocusScope {
+     readonly property real dockFrameInset: dockGeometry.frameInset
+     readonly property real animatedSurfaceRadius: Math.max(0, surfaceMotion.currentTopLeftRadius, surfaceMotion.currentTopRightRadius, surfaceMotion.currentBottomLeftRadius, surfaceMotion.currentBottomRightRadius)
+     onAnimatedSurfaceRadiusChanged: dockChromeSync.schedule()
+-    readonly property real surfaceRadius: config.mode === "taskbar" ? (usesConnectedFrameChrome ? Theme.connectedSurfaceRadius : 0) : Theme.windowRadius
++    readonly property var glassOptions: config.redock ?? ({})
++    readonly property bool glassStyle: glassOptions.enabled === true && config.mode === "compact"
++        && config.position === SettingsData.Position.Bottom && !usesConnectedFrameChrome
++    readonly property real glassFlareWidth: glassStyle ? glassNumber("flareWidth", 30, 1, 60) : 0
++    readonly property real glassFlareHeight: glassStyle ? glassNumber("flareHeight", 22, 1, Math.floor(effectiveBarThickness / 2)) : 0
++    readonly property real surfaceRadius: config.mode === "taskbar" ? (usesConnectedFrameChrome ? Theme.connectedSurfaceRadius : 0)
++        : glassStyle ? glassNumber("radius", 18, 1, Math.floor(effectiveBarThickness / 2)) : Theme.windowRadius
++
++    function glassNumber(key, fallback, low, high) {
++        const value = glassOptions[key];
++        return Math.min(high, Math.max(low, Number.isFinite(value) ? value : fallback));
++    }
+     readonly property color surfaceColor: usesConnectedFrameChrome ? Theme.connectedSurfaceColor : Theme.withAlpha(Theme.hostSurface, backgroundTransparency)
+     readonly property real surfaceTopLeftRadius: usesConnectedFrameChrome && (dock.config.position === SettingsData.Position.Top || dock.config.position === SettingsData.Position.Left) ? 0 : surfaceRadius
+     readonly property real surfaceTopRightRadius: usesConnectedFrameChrome && (dock.config.position === SettingsData.Position.Top || dock.config.position === SettingsData.Position.Right) ? 0 : surfaceRadius
+@@ -512,7 +523,7 @@ FocusScope {
+     readonly property real blurX: dockBackground.x + dockContainer.x + dockMouseArea.x + dockCore.x + dockSlide.x
+     readonly property real blurY: dockBackground.y + dockContainer.y + dockMouseArea.y + dockCore.y + dockSlide.y
+     readonly property real blurWidth: dock.hasApps && dock.reveal ? dockBackground.width : 0
+-    readonly property real blurHeight: dock.hasApps && dock.reveal ? dockBackground.height : 0
++    readonly property real blurHeight: dock.hasApps && dock.reveal ? dockBackground.height + (glassStyle ? dockGeometry.bodyEdgeMargin : 0) : 0
+     readonly property real blurRadius: dock.animatedSurfaceRadius
+ 
+     Item {
+@@ -782,10 +793,27 @@ FocusScope {
+                     MorphSurface {
+                         motion: surfaceMotion
+                         anchors.fill: parent
+-                        visible: !usesConnectedFrameChrome && (!FrameTransitionState.effectiveConnectedFrameModeActive || dock.reveal)
++                        visible: !dock.glassStyle && !usesConnectedFrameChrome && (!FrameTransitionState.effectiveConnectedFrameModeActive || dock.reveal)
+                         color: dock.surfaceColor
+                     }
+ 
++                    Loader {
++                        x: -dock.glassFlareWidth
++                        width: dockBackground.width + 2 * dock.glassFlareWidth
++                        height: dockBackground.height + dockGeometry.bodyEdgeMargin
++                        active: dock.glassStyle
++                        sourceComponent: GlassDockFinish {
++                            cornerRadius: dock.surfaceRadius
++                            flareWidth: dock.glassFlareWidth
++                            flareHeight: dock.glassFlareHeight
++                            topTint: dock.glassOptions.topTint ?? "#4a5973"
++                            bottomTint: dock.glassOptions.bottomTint ?? "#1a1f30"
++                            rimTint: dock.glassOptions.rimTint ?? "#c4d6fa"
++                            topOpacity: dock.glassNumber("topOpacity", 0.33, 0, 1)
++                            bottomOpacity: dock.glassNumber("bottomOpacity", 0.57, 0, 1)
++                        }
++                    }
++
+                     onXChanged: dockChromeSync.schedule()
+                     onYChanged: dockChromeSync.schedule()
+                     onWidthChanged: dockChromeSync.schedule()
+@@ -830,7 +858,7 @@ FocusScope {
+                     y: dockBackground.y - borderThickness
+                     width: dockBackground.width + borderThickness * 2
+                     height: dockBackground.height + borderThickness * 2
+-                    visible: dock.config.borderEnabled && dock.hasApps && !usesConnectedFrameChrome
++                    visible: dock.config.borderEnabled && dock.hasApps && !usesConnectedFrameChrome && !dock.glassStyle
+                     radius: dock.surfaceRadius + borderThickness
+                     color: "transparent"
+                     border.width: borderThickness
+diff --git a/Modules/Dock/GlassDockFinish.qml b/Modules/Dock/GlassDockFinish.qml
+new file mode 100644
+index 0000000..c2937f7
+--- /dev/null
++++ b/Modules/Dock/GlassDockFinish.qml
+@@ -0,0 +1,23 @@
++import QtQuick
++
++ShaderEffect {
++    required property real cornerRadius
++    required property real flareWidth
++    required property real flareHeight
++
++    required property color topTint
++    required property color bottomTint
++    required property color rimTint
++    required property real topOpacity
++    required property real bottomOpacity
++
++    readonly property real widthPx: width
++    readonly property real heightPx: height
++
++    // ShaderEffect premultiplies color uniforms. The shader controls opacity separately.
++    readonly property vector3d glassTopRgb: Qt.vector3d(topTint.r, topTint.g, topTint.b)
++    readonly property vector3d glassBottomRgb: Qt.vector3d(bottomTint.r, bottomTint.g, bottomTint.b)
++    readonly property vector3d glassRimRgb: Qt.vector3d(rimTint.r, rimTint.g, rimTint.b)
++
++    fragmentShader: Qt.resolvedUrl("../../Shaders/qsb/redock.frag.qsb")
++}
+diff --git a/Modules/SurfaceWidgets/SurfaceWidgetFactory.qml b/Modules/SurfaceWidgets/SurfaceWidgetFactory.qml
+index 89af5d3..63f8929 100644
+--- a/Modules/SurfaceWidgets/SurfaceWidgetFactory.qml
++++ b/Modules/SurfaceWidgets/SurfaceWidgetFactory.qml
+@@ -376,6 +376,8 @@ Item {
+ 
+         Clock {
+             id: clockWidget
++            fillColor: root.surfaceContext.config?.redock?.enabled ? root.surfaceContext.config.redock.pillTint ?? "#68110e1c" : defaultFillColor
++            contentColor: root.surfaceContext.config?.redock?.enabled ? root.surfaceContext.config.redock.pillText ?? "#f2eef9" : defaultContentColor
+             axis: root.surfaceContext.axis
+             compactMode: root.overlapping
+             barThickness: root.surfaceContext.thickness
+@@ -480,6 +482,8 @@ Item {
+ 
+         Weather {
+             id: weatherWidget
++            fillColor: root.surfaceContext.config?.redock?.enabled ? root.surfaceContext.config.redock.pillTint ?? "#68110e1c" : defaultFillColor
++            contentColor: root.surfaceContext.config?.redock?.enabled ? root.surfaceContext.config.redock.pillText ?? "#f2eef9" : defaultContentColor
+             axis: surfaceContext.axis
+             barThickness: surfaceContext.thickness
+             widgetThickness: surfaceContext.widgetThickness
+@@ -904,8 +908,9 @@ Item {
+                 width: surfaceContext.isVertical ? parent.width * 0.6 : 1
+                 height: surfaceContext.isVertical ? 1 : parent.height * 0.6
+                 anchors.centerIn: parent
+-                color: Theme.outline
+-                opacity: 0.3
++                readonly property bool inGlassDock: surfaceContext.config?.redock?.enabled === true
++                color: inGlassDock ? "#e2edfc" : Theme.outline
++                opacity: inGlassDock ? 0.32 : 0.3
+             }
+         }
+     }
+diff --git a/Widgets/WindowBlur.qml b/Widgets/WindowBlur.qml
+index 4473f8a..e0b9f0c 100644
+--- a/Widgets/WindowBlur.qml
++++ b/Widgets/WindowBlur.qml
+@@ -18,6 +18,27 @@ Item {
+     property real blurHeight: 0
+     property real blurRadius: 0
+     property real blurBottomRadius: blurRadius
++    property real bottomFlareWidth: 0
++    property real bottomFlareHeight: 0
++
++    component BottomFlare: Region {
++        id: flare
++        required property bool atRight
++        readonly property bool active: root.blurWidth > 0 && root.blurHeight > 0 && root.bottomFlareWidth > 0 && root.bottomFlareHeight > 0
++        x: atRight ? root.blurX + root.blurWidth : root.blurX - root.bottomFlareWidth
++        y: root.blurY + root.blurHeight - root.bottomFlareHeight
++        width: active ? root.bottomFlareWidth : 0
++        height: active ? root.bottomFlareHeight : 0
++
++        Region {
++            intersection: Intersection.Subtract
++            shape: RegionShape.Ellipse
++            x: flare.atRight ? flare.x : flare.x - flare.width
++            y: flare.y - flare.height
++            width: flare.width * 2
++            height: flare.height * 2
++        }
++    }
+     property bool clipEnabled: false
+     property real clipX: blurX
+     property real clipY: blurY
+@@ -43,11 +64,14 @@ Item {
+             radius: root.blurBottomRadius
+         }
+ 
++        BottomFlare { atRight: false }
++        BottomFlare { atRight: true }
++
+         Region {
+             intersection: Intersection.Intersect
+-            x: root.clipEnabled ? root.clipX : root.blurX
++            x: root.clipEnabled ? root.clipX : root.blurX - root.bottomFlareWidth
+             y: root.clipEnabled ? root.clipY : root.blurY
+-            width: root.clipEnabled ? root.clipWidth : root.blurWidth
++            width: root.clipEnabled ? root.clipWidth : root.blurWidth + 2 * root.bottomFlareWidth
+             height: root.clipEnabled ? root.clipHeight : root.blurHeight
+         }
+ 

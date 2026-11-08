@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install build tools
+        run: dnf -y install curl git gzip patch python3 qt6-qtshadertools ShellCheck tar
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check launch script
+        run: shellcheck launch.sh
+      - name: Build and test against Dux Shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          stock=$(mktemp -d)
+          trap 'rm -rf "$stock"' EXIT
+          version=$(cat dms-version)
+          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-shell/tar.gz/refs/tags/v$version" -o "$stock/dux-shell.tar.gz"
+          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-qml-common/tar.gz/be3e16ca62866a749b34cfefe1aaed81cfe21e94" -o "$stock/qml-common.tar.gz"
+          (
+            cd "$stock"
+            sha256sum -c "$GITHUB_WORKSPACE/tests/upstream.sha256"
+          )
+          mkdir "$stock/source"
+          tar -xzf "$stock/dux-shell.tar.gz" -C "$stock/source" --strip-components=1
+          tar -xzf "$stock/qml-common.tar.gz" -C "$stock/source/dux-qml-common" --strip-components=1
+          REDOCK_STOCK_UI="$stock/source/quickshell" python3 -m unittest discover -s tests -v
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Archive and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          archive="redock-$TAG.tar.gz"
+          git archive --format=tar.gz --prefix="redock-$TAG/" --output="$archive" HEAD
+          sha256sum "$archive" > "$archive.sha256"
+          gh release create "$TAG" "$archive" "$archive.sha256" --verify-tag --generate-notes

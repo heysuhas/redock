@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Build and manage the Redock overlay for Dux Shell."""
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parent
+VERSION = (ROOT / "dms-version").read_text().strip()
+SERVICE = "dms.service"
+DOCK_ID = "redock"
+
+
+class RedockError(Exception):
+    pass
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, text=True, **kwargs)
+
+
+def systemctl(*args, **kwargs):
+    return run("systemctl", "--user", *args, **kwargs)
+
+
+def xdg(name, fallback):
+    return Path(os.environ.get(name) or Path.home() / fallback).resolve()
+
+
+def read_json(path):
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise RedockError(f"Expected a JSON object in {path}")
+    return value
+
+
+def write_file(path, data):
+    """Replace a file atomically, keeping its mode and filesystem metadata."""
+    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temp:
+        staged = Path(temp.name)
+    try:
+        if path.exists():
+            shutil.copystat(path, staged)
+        staged.write_bytes(data)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def write_json(path, value):
+    write_file(path, (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode())
+
+
+def shader_baker():
+    for name in ("qsb-qt6", "qsb6", "qsb"):
+        if executable := shutil.which(name):
+            return executable
+    if qtpaths := shutil.which("qtpaths6"):
+        query = run(qtpaths, "--query", "QT_INSTALL_BINS", capture_output=True).stdout.strip()
+        candidate = Path(query) / "qsb"
+        if os.access(candidate, os.X_OK):
+            return candidate
+    raise RedockError("Install the Qt 6 Shader Baker (qsb).")
+
+
+def stock_tree(path):
+    return (
+        (path / "shell.qml").is_file()
+        and (path / "DCommon/Common/Paths.qml").is_file()
+        and (path / "VERSION").is_file()
+        and (path / "VERSION").read_text().strip() == f"v{VERSION}"
+    )
+
+
+def find_stock_tree():
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        choices = [
+            path for path in (Path(runtime) / "dms-shell").glob("*") if stock_tree(path)
+        ]
+        if len(choices) == 1:
+            return choices[0]
+    raise RedockError("Could not identify one stock DMS UI. Pass --shell-dir with a complete stock shell tree.")
+
+
+def build(source, destination):
+    if not stock_tree(source):
+        raise RedockError(f"Expected a complete stock DMS v{VERSION} UI at {source}")
+    if destination.exists() or destination.is_symlink():
+        raise RedockError(f"Destination already exists: {destination}")
+    baker = shader_baker()
+    with TemporaryDirectory(prefix=".redock-build-", dir=destination.parent) as temp:
+        stage = Path(temp) / "ui"
+        # A source checkout links to the Dux QML Common submodule.
+        shutil.copytree(source, stage, symlinks=False)
+        run("chmod", "-R", "u+w", stage)
+        patch = ROOT / "patches" / f"dux-shell-{VERSION}.patch"
+        run("patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", patch, cwd=stage)
+        shader = stage / "Shaders" / "frag" / "redock.frag"
+        shutil.copyfile(ROOT / "shaders" / "redock.frag", shader)
+        run(baker, "--qt6", "-o", stage / "Shaders" / "qsb" / "redock.frag.qsb", shader)
+        stage.rename(destination)
+
+
+def stock_service_binary():
+    launch = systemctl("show", SERVICE, "-p", "ExecStart", "--value", capture_output=True).stdout.strip()
+    # Only replace the package's normal launch command.
+    match = re.fullmatch(r"\{ path=(/[^\s;]+) ; argv\[\]=\1 run --session ; [^{}]*\}", launch)
+    if not match:
+        raise RedockError("Expected the stock dms.service command. Use 'redock build' with a custom launcher.")
+    binary = Path(match[1])
+    version = run(binary, "version", capture_output=True).stdout.strip()
+    if version != f"dms v{VERSION}":
+        raise RedockError(f"Redock targets DMS v{VERSION}. Found {version}.")
+    environment = systemctl("show", SERVICE, "-p", "Environment", "--value", capture_output=True).stdout
+    if "DMS_SHELL_DIR=" in environment:
+        raise RedockError("dms.service already defines DMS_SHELL_DIR.")
+    return binary
+
+
+def unit_arg(path, *, expand_variables=True):
+    value = str(path)
+    if any(ord(char) < 32 for char in value):
+        raise RedockError("Systemd paths must not contain control characters.")
+    value = value.replace("%", "%%")
+    if expand_variables:
+        value = value.replace("$", "$$")
+    return json.dumps(value, ensure_ascii=False)
+
+
+@contextmanager
+def stopped_service(paths, *, require_active=False):
+    """Keep DMS from writing the same JSON while its profile is being changed."""
+    status = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", SERVICE],
+        stdout=subprocess.DEVNULL,
+    )
+    if status.returncode not in (0, 3):
+        raise RedockError("Cannot determine whether dms.service is running.")
+    active = status.returncode == 0
+    if require_active and not active:
+        raise RedockError("Start the stock dms.service before installing.")
+    if active:
+        systemctl("stop", SERVICE)
+    before = {}
+    try:
+        before = {path: path.read_bytes() if path.exists() else None for path in paths}
+        yield
+        systemctl("daemon-reload")
+        if active:
+            systemctl("start", SERVICE)
+    except (Exception, KeyboardInterrupt):
+        if active:
+            subprocess.run(["systemctl", "--user", "stop", SERVICE], check=False)
+        for path, data in before.items():
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_file(path, data)
+        systemctl("daemon-reload")
+        if active:
+            systemctl("start", SERVICE)
+        raise
+
+
+def profile_settings(path):
+    settings = read_json(path)
+    profiles = settings.get("dockConfigs", [])
+    if not isinstance(profiles, list) or any(not isinstance(p, dict) for p in profiles):
+        raise RedockError(f"Invalid dockConfigs in {path}")
+    if "dockConfigs" not in settings and any(key == "showDock" or key.startswith("dock") for key in settings):
+        raise RedockError("Save your dock settings in DMS first to migrate the legacy profile.")
+    return settings, profiles
+
+
+def install(settings, dropin, data, source):
+    if data.exists() or data.is_symlink() or dropin.exists() or dropin.is_symlink():
+        raise RedockError("An install already exists. Run './redock uninstall' first.")
+    binary = stock_service_binary()
+    with TemporaryDirectory(prefix=".redock-install-", dir=data.parent) as temp:
+        stage = Path(temp) / "redock"
+        stage.mkdir()
+        build(source or find_stock_tree(), stage / "ui")
+        shutil.copy2(ROOT / "launch.sh", stage / "launch.sh")
+        with binary.open("rb") as executable:
+            checksum = hashlib.file_digest(executable, "sha256").hexdigest()
+        (stage / "dms.sha256").write_text(checksum + "\n")
+        override = (
+            f"[Service]\nExecStart=\n"
+            f"ExecStart={unit_arg(data / 'launch.sh', expand_variables=False)} {unit_arg(binary)} run --session\n"
+        ).encode()
+        (stage / "service.conf").write_bytes(override)
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+
+        stage.rename(data)
+        try:
+            with stopped_service([settings, dropin], require_active=True):
+                current, profiles = profile_settings(settings)
+                if any(profile.get("id") == DOCK_ID for profile in profiles):
+                    raise RedockError(f"A dock already uses the '{DOCK_ID}' profile ID.")
+                if any(p.get("enabled") and p.get("position", 1) == 1 for p in profiles):
+                    raise RedockError("Disable your existing bottom dock in DMS Settings first.")
+                if any(bar.get("enabled", True) and bar.get("visible", True) and bar.get("position") == 1
+                       for bar in current.get("barConfigs", [])):
+                    raise RedockError("Move or disable your existing bottom bar in DMS Settings first.")
+                if "barConfigs" not in current and current.get("barPosition") == 1:
+                    raise RedockError("Move your bottom bar in DMS Settings first.")
+                if "dockConfigs" not in current:
+                    (data / "implicit-docks").touch()
+                current["dockConfigs"] = profiles + [read_json(ROOT / "preset.json")]
+                write_json(settings, current)
+                write_file(dropin, override)
+        except (Exception, KeyboardInterrupt):
+            if not dropin.exists():
+                shutil.rmtree(data)
+            raise
+    print("Redock installed. Open DMS Settings → Dock to arrange your widgets.")
+
+
+def uninstall(settings, session, dropin, data):
+    saved_override = data / "service.conf"
+    if not saved_override.is_file():
+        raise RedockError("No Redock installation found.")
+    if dropin.exists() and dropin.read_bytes() != saved_override.read_bytes():
+        raise RedockError(f"The service override was edited. Remove it manually before uninstalling: {dropin}")
+    with stopped_service([settings, session, dropin]):
+        current, profiles = profile_settings(settings)
+        if any(profile.get("id") == DOCK_ID for profile in profiles):
+            remaining = [profile for profile in profiles if profile.get("id") != DOCK_ID]
+            if not remaining and (data / "implicit-docks").exists():
+                del current["dockConfigs"]
+            else:
+                current["dockConfigs"] = remaining
+            write_json(settings, current)
+        if session.is_file():
+            state = read_json(session)
+            pins = state.get("dockPins")
+            if isinstance(pins, dict) and DOCK_ID in pins:
+                del pins[DOCK_ID]
+                write_json(session, state)
+        dropin.unlink(missing_ok=True)
+    shutil.rmtree(data)
+    print("Redock removed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    install_parser = commands.add_parser("install", help="install on a systemd-managed DMS session")
+    install_parser.add_argument("--shell-dir", type=Path, help="complete stock DMS QML tree")
+    commands.add_parser("uninstall", help="remove the installed profile and service override")
+    build_parser = commands.add_parser("build", help="build a standalone QML tree for dms --config")
+    build_parser.add_argument("shell_dir", type=Path)
+    build_parser.add_argument("destination", type=Path)
+    args = parser.parse_args()
+    if args.command == "build":
+        build(args.shell_dir.resolve(), args.destination.absolute())
+        return
+
+    config = xdg("XDG_CONFIG_HOME", ".config")
+    settings = (config / "dms/settings.json").resolve()
+    if not settings.is_file():
+        raise RedockError("Open DMS Settings once to initialize its configuration.")
+    session = (xdg("XDG_STATE_HOME", ".local/state") / "dms/session.json").resolve()
+    dropin = config / "systemd/user/dms.service.d/70-redock.conf"
+    data = config / "dms/redock"
+
+    with (data.parent / ".redock.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.command == "install":
+            install(settings, dropin, data, args.shell_dir)
+        else:
+            uninstall(settings, session, dropin, data)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RedockError, OSError, ValueError, subprocess.CalledProcessError) as error:
+        sys.exit(f"redock: {error}")
