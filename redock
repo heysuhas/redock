@@ -15,7 +15,8 @@ import sys
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parent
-VERSION = (ROOT / "dms-version").read_text().strip()
+# One supported DMS release per line, each with its own patch.
+VERSIONS = (ROOT / "dms-version").read_text().split()
 SERVICE = "dms.service"
 DOCK_ID = "redock"
 
@@ -72,29 +73,38 @@ def shader_baker():
     raise RedockError("Install the Qt 6 Shader Baker (qsb).")
 
 
-def stock_tree(path):
-    return (
-        (path / "shell.qml").is_file()
-        and (path / "DCommon/Common/Paths.qml").is_file()
-        and (path / "VERSION").is_file()
-        and (path / "VERSION").read_text().strip() == f"v{VERSION}"
-    )
+def supported():
+    return ", ".join(f"v{version}" for version in VERSIONS)
 
 
-def find_stock_tree():
+def stock_version(path):
+    """Return the supported version of a complete stock UI, or None."""
+    if not ((path / "shell.qml").is_file()
+            and (path / "DCommon/Common/Paths.qml").is_file()
+            and (path / "VERSION").is_file()):
+        return None
+    version = (path / "VERSION").read_text().strip().removeprefix("v")
+    return version if version in VERSIONS else None
+
+
+def find_stock_tree(version):
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
         choices = [
-            path for path in (Path(runtime) / "dms-shell").glob("*") if stock_tree(path)
+            path for path in (Path(runtime) / "dms-shell").glob("*") if stock_version(path) == version
         ]
         if len(choices) == 1:
             return choices[0]
     raise RedockError("Could not identify one stock DMS UI. Pass --shell-dir with a complete stock shell tree.")
 
 
-def build(source, destination):
-    if not stock_tree(source):
-        raise RedockError(f"Expected a complete stock DMS v{VERSION} UI at {source}")
+def build(source, destination, expected=None):
+    version = stock_version(source)
+    if version is None:
+        raise RedockError(f"Expected a complete stock DMS UI ({supported()}) at {source}")
+    # The patched UI must match the binary that will load it.
+    if expected and version != expected:
+        raise RedockError(f"The stock UI at {source} is v{version}, but dms is v{expected}.")
     if destination.exists() or destination.is_symlink():
         raise RedockError(f"Destination already exists: {destination}")
     baker = shader_baker()
@@ -103,7 +113,7 @@ def build(source, destination):
         # A source checkout links to the Dux QML Common submodule.
         shutil.copytree(source, stage, symlinks=False)
         run("chmod", "-R", "u+w", stage)
-        patch = ROOT / "patches" / f"dux-shell-{VERSION}.patch"
+        patch = ROOT / "patches" / f"dux-shell-{version}.patch"
         run("patch", "--batch", "--forward", "--fuzz=0", "-p1", "-i", patch, cwd=stage)
         shader = stage / "Shaders" / "frag" / "redock.frag"
         shutil.copyfile(ROOT / "shaders" / "redock.frag", shader)
@@ -118,13 +128,14 @@ def stock_service_binary():
     if not match:
         raise RedockError("Expected the stock dms.service command. Use 'redock build' with a custom launcher.")
     binary = Path(match[1])
-    version = run(binary, "version", capture_output=True).stdout.strip()
-    if version != f"dms v{VERSION}":
-        raise RedockError(f"Redock targets DMS v{VERSION}. Found {version}.")
+    found = run(binary, "version", capture_output=True).stdout.strip()
+    version = found.removeprefix("dms v")
+    if found == version or version not in VERSIONS:
+        raise RedockError(f"Redock supports DMS {supported()}. Found {found}.")
     environment = systemctl("show", SERVICE, "-p", "Environment", "--value", capture_output=True).stdout
     if "DMS_SHELL_DIR=" in environment:
         raise RedockError("dms.service already defines DMS_SHELL_DIR.")
-    return binary
+    return binary, version
 
 
 def unit_arg(path, *, expand_variables=True):
@@ -185,11 +196,11 @@ def profile_settings(path):
 def install(settings, dropin, data, source):
     if data.exists() or data.is_symlink() or dropin.exists() or dropin.is_symlink():
         raise RedockError("An install already exists. Run './redock uninstall' first.")
-    binary = stock_service_binary()
+    binary, version = stock_service_binary()
     with TemporaryDirectory(prefix=".redock-install-", dir=data.parent) as temp:
         stage = Path(temp) / "redock"
         stage.mkdir()
-        build(source or find_stock_tree(), stage / "ui")
+        build(source or find_stock_tree(version), stage / "ui", version)
         shutil.copy2(ROOT / "launch.sh", stage / "launch.sh")
         with binary.open("rb") as executable:
             checksum = hashlib.file_digest(executable, "sha256").hexdigest()

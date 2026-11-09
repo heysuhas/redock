@@ -8,7 +8,7 @@ A glass dock that meets the bottom edge of your desktop. Curved ends and a soft 
 
 ## Install
 
-Tested with **Dux Shell 2.1.0**, **Hyprland 0.57.1**, and **Qt 6.11**. You’ll need a systemd-managed DMS session, Python 3.11+, GNU patch, and Qt 6 Shader Baker (`qsb`). On Fedora, `qsb` comes with `qt6-qtshadertools`.
+Tested with **Dux Shell 2.1.0 and 2.1.2**, **Hyprland 0.57.1**, and **Qt 6.11**. You’ll need a systemd-managed DMS session, Python 3.11+, GNU patch, and Qt 6 Shader Baker (`qsb`). On Fedora, `qsb` comes with `qt6-qtshadertools`.
 
 Start the DMS user service and move or disable any existing bottom bar or dock.
 

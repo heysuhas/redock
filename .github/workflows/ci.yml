@@ -13,6 +13,18 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     container: fedora:44
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with dms-version. qml-common is the dux-qml-common submodule commit of each release.
+        include:
+          - dms: 2.1.0
+            qml-common: be3e16ca62866a749b34cfefe1aaed81cfe21e94
+          - dms: 2.1.2
+            qml-common: 0877466a25b8e191a865bf75d0e500de6351ae04
+    env:
+      DMS: ${{ matrix.dms }}
+      QML_COMMON: ${{ matrix.qml-common }}
     steps:
       - name: Install build tools
         run: dnf -y install curl git gzip patch python3 qt6-qtshadertools ShellCheck tar
@@ -27,16 +39,24 @@ jobs:
           set -euo pipefail
           stock=$(mktemp -d)
           trap 'rm -rf "$stock"' EXIT
-          version=$(cat dms-version)
-          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-shell/tar.gz/refs/tags/v$version" -o "$stock/dux-shell.tar.gz"
-          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-qml-common/tar.gz/be3e16ca62866a749b34cfefe1aaed81cfe21e94" -o "$stock/qml-common.tar.gz"
+          # Every supported version needs a matrix entry, and every entry must be supported.
+          grep -qx "$DMS" dms-version
+          while read -r version; do
+            grep -qx -- "          - dms: $version" .github/workflows/ci.yml
+          done < dms-version
+          shell="dux-shell-$DMS.tar.gz"
+          common="qml-common-$QML_COMMON.tar.gz"
+          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-shell/tar.gz/refs/tags/v$DMS" -o "$stock/$shell"
+          curl -fLsS "https://codeload.github.com/duxlabs-dev/dux-qml-common/tar.gz/$QML_COMMON" -o "$stock/$common"
           (
             cd "$stock"
-            sha256sum -c "$GITHUB_WORKSPACE/tests/upstream.sha256"
+            sums=$(grep -E "  ($shell|$common)\$" "$GITHUB_WORKSPACE/tests/upstream.sha256")
+            [[ $(wc -l <<< "$sums") -eq 2 ]]
+            sha256sum -c <<< "$sums"
           )
           mkdir "$stock/source"
-          tar -xzf "$stock/dux-shell.tar.gz" -C "$stock/source" --strip-components=1
-          tar -xzf "$stock/qml-common.tar.gz" -C "$stock/source/dux-qml-common" --strip-components=1
+          tar -xzf "$stock/$shell" -C "$stock/source" --strip-components=1
+          tar -xzf "$stock/$common" -C "$stock/source/dux-qml-common" --strip-components=1
           REDOCK_STOCK_UI="$stock/source/quickshell" python3 -m unittest discover -s tests -v
 
   release:
