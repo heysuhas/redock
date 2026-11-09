@@ -9,6 +9,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 STOCK = Path(os.environ["REDOCK_STOCK_UI"]).resolve()
+STOCK_VERSION = (STOCK / "VERSION").read_text().strip()
+VERSIONS = (ROOT / "dms-version").read_text().split()
 
 
 class RedockTests(unittest.TestCase):
@@ -34,9 +36,7 @@ class RedockTests(unittest.TestCase):
         self.original = {"dockConfigs": [{"id": "dock", "enabled": False}], "userSetting": "keep"}
         self.settings.write_text(json.dumps(self.original))
         self.session.write_text('{"dockPins":{"dock":["sample-app"]},"userState":true}')
-        self.write_executable("dms", """#!/bin/sh
-if [ "$1" = version ]; then echo 'dms v2.1.0'; else printf '%s\n' "$@"; fi
-""")
+        self.fake_dms(STOCK_VERSION)
         self.write_executable("systemctl", """#!/bin/sh
 set -eu
 [ "$1" = --user ]
@@ -56,6 +56,11 @@ case "$2" in
     fi ;;
   *) exit 2 ;;
 esac
+""")
+
+    def fake_dms(self, version):
+        self.write_executable("dms", f"""#!/bin/sh
+if [ "$1" = version ]; then echo 'dms {version}'; else printf '%s\\n' "$@"; fi
 """)
 
     def write_executable(self, name, content):
@@ -114,6 +119,21 @@ esac
         self.settings.write_text(json.dumps(self.original))
         self.assertIn("bottom bar", self.install(ok=False).stderr)
         self.assertFalse(self.dropin.exists())
+        self.assertFalse(self.installation.exists())
+        self.assertEqual(json.loads(self.settings.read_text()), self.original)
+
+    def test_refuses_unsupported_version(self):
+        self.fake_dms("v0.0.1")
+        self.assertIn("Redock supports DMS", self.install(ok=False).stderr)
+        self.assertFalse(self.installation.exists())
+        self.assertEqual(json.loads(self.settings.read_text()), self.original)
+
+    def test_refuses_ui_from_another_version(self):
+        others = [version for version in VERSIONS if f"v{version}" != STOCK_VERSION]
+        if not others:
+            self.skipTest("only one supported version")
+        self.fake_dms(f"v{others[0]}")
+        self.assertIn(f"but dms is v{others[0]}", self.install(ok=False).stderr)
         self.assertFalse(self.installation.exists())
         self.assertEqual(json.loads(self.settings.read_text()), self.original)
 
