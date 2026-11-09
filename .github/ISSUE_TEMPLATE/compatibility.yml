@@ -1,0 +1,22 @@
+name: Compatibility report
+description: Share a live test on a distribution or compositor
+body:
+  - type: textarea
+    id: setup
+    attributes:
+      label: What did you test?
+      description: Include the distro and release, compositor and version, display scale, DMS and Redock versions, and how you installed and started DMS.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: What worked?
+      description: Tell us what you checked and what happened. Include install, the dock and its blur, and uninstall if you tested them.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshot or error output
+      description: A cropped screenshot is helpful for rendering results. For errors, paste the relevant output after removing private information.

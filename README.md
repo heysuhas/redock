@@ -34,4 +34,4 @@ In `~/.config/dms/settings.json`, the dock profile’s `redock` block controls t
 
 This removes the Redock profile and its service override. If a DMS update changes the installed binary, the service falls back to the stock UI. Reinstall with a compatible Redock release to restore the glass.
 
-[MIT](LICENSE) · [Dux Shell license](LICENSE.dux-shell)
+[Contributing](CONTRIBUTING.md) · [MIT](LICENSE) · [Dux Shell license](LICENSE.dux-shell)

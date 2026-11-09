@@ -1,0 +1,23 @@
+name: Bug report
+description: Report a problem with the dock or installer
+body:
+  - type: textarea
+    id: setup
+    attributes:
+      label: Desktop setup
+      description: Include your Redock tag or commit, output from `dms version`, distribution and release, and compositor and version.
+      placeholder: Fedora 44, Hyprland 0.57.1, DMS 2.1.2, Redock main at …
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: What happened?
+      description: Give the steps to reproduce it and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Error output or screenshot
+      description: Include the relevant error or a cropped screenshot. Remove private information before posting.
